@@ -28,28 +28,33 @@ fn load_env() -> (&'static str, &'static str, &'static str, &'static str) {
     return (host, port, user, pass);
 }
 
-fn show_confirm(message: &str) -> bool {
-    MessageDialog::new()
+fn show_confirm(message: &str) -> Result<bool, Box<dyn std::error::Error>> {
+    let result = MessageDialog::new()
         .set_title("MikroTik SSH")
         .set_text(message)
         .set_type(MessageType::Info)
-        .show_confirm()
-        .unwrap_or(false)
+        .show_confirm()?;
+
+    Ok(result)
 }
 
 fn show_alert(message: &str, msg_type: MessageType) {
-    MessageDialog::new()
+    let result = MessageDialog::new()
         .set_title("MikroTik SSH")
         .set_text(message)
         .set_type(msg_type)
-        .show_alert()
-        .unwrap_or(());
+        .show_alert();
+
+    if let Err(e) = result {
+        eprintln!("{}", message);
+        eprintln!("Error al mostrar el diálogo: {}", e);
+    }
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (host, port, user, pass) = load_env();
 
-    let disable = show_confirm("¿Desactivar el filtro de bloqueo de internet?");
+    let disable = show_confirm("¿Desactivar el filtro de bloqueo de internet?")?;
 
     let sess = make_session(&host, &port, &user, &pass)?;
     if !sess.authenticated() {
