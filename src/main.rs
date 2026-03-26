@@ -1,4 +1,4 @@
-#![windows_subsystem = "windows"]
+#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
 use native_dialog::{MessageDialog, MessageType};
 use ssh2::Session;
@@ -53,7 +53,13 @@ fn show_alert(message: &str, msg_type: MessageType) {
     }
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() {
+    if let Err(e) = run() {
+        show_alert(&format!("Error: {}", e), MessageType::Error);
+    }
+}
+
+fn run() -> Result<(), Box<dyn std::error::Error>> {
     let (host, port, user, pass) = load_env();
 
     let enable_block = show_confirm("¿Activar el bloqueo de internet?")?;
