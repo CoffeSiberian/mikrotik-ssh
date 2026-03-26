@@ -1,3 +1,4 @@
+use native_dialog::{MessageDialog, MessageType};
 use ssh2::Session;
 use std::env;
 use std::net::TcpStream;
@@ -27,50 +28,52 @@ fn load_env() -> (&'static str, &'static str, &'static str, &'static str) {
     return (host, port, user, pass);
 }
 
-fn get_user_input() -> String {
-    let mut input = String::new();
-    std::io::stdin().read_line(&mut input).unwrap();
+fn show_confirm(message: &str) -> Result<bool, Box<dyn std::error::Error>> {
+    let result = MessageDialog::new()
+        .set_title("MikroTik SSH")
+        .set_text(message)
+        .set_type(MessageType::Info)
+        .show_confirm()?;
 
-    return input.trim().to_uppercase();
+    Ok(result)
 }
 
-fn valid_param(input: &str) -> bool {
-    return input == "Y" || input == "N";
+fn show_alert(message: &str, msg_type: MessageType) {
+    let result = MessageDialog::new()
+        .set_title("MikroTik SSH")
+        .set_text(message)
+        .set_type(msg_type)
+        .show_alert();
+
+    if let Err(e) = result {
+        eprintln!("{}", message);
+        eprintln!("Error al mostrar el diálogo: {}", e);
+    }
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (host, port, user, pass) = load_env();
 
-    println!("¿Desabilitar el filtro de bloqueo de internet?");
-    let input = get_user_input();
-
-    if !valid_param(&input) {
-        println!("Opción no válida");
-        return Ok(());
-    }
+    let disable = show_confirm("¿Desactivar el filtro de bloqueo de internet?")?;
 
     let sess = make_session(&host, &port, &user, &pass)?;
     if !sess.authenticated() {
-        println!("failed to authenticate");
-
+        show_alert("Error: No se pudo autenticar con el servidor", MessageType::Error);
         return Ok(());
     }
     let mut channel = sess.channel_session()?;
 
-    if input == "Y" {
+    if disable {
         channel.exec(
             "/ip firewall filter set [find comment=\"Bloqueo Internet LAB 3\"] disabled=yes",
         )?;
-        println!("Filtro de bloqueo de internet desactivado");
+        show_alert("Filtro de bloqueo de internet desactivado", MessageType::Info);
     } else {
         channel.exec(
             "/ip firewall filter set [find comment=\"Bloqueo Internet LAB 3\"] disabled=no",
         )?;
-        println!("Filtro de bloqueo de internet activado");
+        show_alert("Filtro de bloqueo de internet activado", MessageType::Info);
     }
-
-    println!("Presione ENTER para terminar");
-    get_user_input();
 
     Ok(())
 }
