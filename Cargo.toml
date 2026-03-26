@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 ssh2 = { version = "0.9.5", features = ["vendored-openssl"] }
 openssl = { version = "0.10.71", features = ["vendored"] }
+native-dialog = "0.7.0"
 
 [build-dependencies]
 dotenv-build = "0.1.1"
