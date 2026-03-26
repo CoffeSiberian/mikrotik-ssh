@@ -1,3 +1,5 @@
+#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
+
 use native_dialog::{MessageDialog, MessageType};
 use ssh2::Session;
 use std::env;
@@ -51,10 +53,16 @@ fn show_alert(message: &str, msg_type: MessageType) {
     }
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() {
+    if let Err(e) = run() {
+        show_alert(&format!("Error: {}", e), MessageType::Error);
+    }
+}
+
+fn run() -> Result<(), Box<dyn std::error::Error>> {
     let (host, port, user, pass) = load_env();
 
-    let disable = show_confirm("¿Desactivar el filtro de bloqueo de internet?")?;
+    let enable_block = show_confirm("¿Activar el bloqueo de internet?")?;
 
     let sess = make_session(&host, &port, &user, &pass)?;
     if !sess.authenticated() {
@@ -63,16 +71,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let mut channel = sess.channel_session()?;
 
-    if disable {
-        channel.exec(
-            "/ip firewall filter set [find comment=\"Bloqueo Internet LAB 3\"] disabled=yes",
-        )?;
-        show_alert("Filtro de bloqueo de internet desactivado", MessageType::Info);
-    } else {
+    if enable_block {
         channel.exec(
             "/ip firewall filter set [find comment=\"Bloqueo Internet LAB 3\"] disabled=no",
         )?;
         show_alert("Filtro de bloqueo de internet activado", MessageType::Info);
+    } else {
+        channel.exec(
+            "/ip firewall filter set [find comment=\"Bloqueo Internet LAB 3\"] disabled=yes",
+        )?;
+        show_alert("Filtro de bloqueo de internet desactivado", MessageType::Info);
     }
 
     Ok(())
