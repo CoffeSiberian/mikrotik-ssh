@@ -3,18 +3,32 @@
 use native_dialog::{MessageDialog, MessageType};
 use ssh2::Session;
 use std::env;
-use std::net::TcpStream;
+use std::net::{TcpStream, ToSocketAddrs};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc, Arc};
+use std::time::Duration;
+
+const SSH_TIMEOUT_SECS: u64 = 10;
+// Extra seconds added on top of the SSH timeout to allow the SSH layer to
+// return its own timeout error before the channel receiver gives up.
+const SSH_GRACE_PERIOD_SECS: u64 = 2;
 
 fn make_session(
     ip: &str,
     port: &str,
     user: &str,
     pass: &str,
-) -> Result<Session, Box<dyn std::error::Error>> {
-    let tcp = TcpStream::connect(format!("{}:{}", ip, port))?;
+) -> Result<Session, Box<dyn std::error::Error + Send + Sync>> {
+    let addr = format!("{}:{}", ip, port);
+    let sock_addr = addr
+        .to_socket_addrs()?
+        .next()
+        .ok_or("No se pudo resolver la dirección del servidor")?;
+    let tcp = TcpStream::connect_timeout(&sock_addr, Duration::from_secs(SSH_TIMEOUT_SECS))?;
     let mut sess = Session::new()?;
 
     sess.set_tcp_stream(tcp);
+    sess.set_timeout((SSH_TIMEOUT_SECS * 1000) as u32);
     sess.handshake()?;
     sess.userauth_password(user, pass)?;
 
@@ -64,23 +78,58 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     let enable_block = show_confirm("¿Activar el bloqueo de internet?")?;
 
-    let sess = make_session(&host, &port, &user, &pass)?;
-    if !sess.authenticated() {
-        show_alert("Error: No se pudo autenticar con el servidor", MessageType::Error);
-        return Ok(());
-    }
-    let mut channel = sess.channel_session()?;
+    // Shared flag: the main thread sets this to true when recv_timeout expires,
+    // signalling the worker that it must not execute the firewall command.
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let cancelled_worker = Arc::clone(&cancelled);
 
-    if enable_block {
-        channel.exec(
-            "/ip firewall filter set [find comment=\"Bloqueo Internet LAB 3\"] disabled=no",
-        )?;
-        show_alert("Filtro de bloqueo de internet activado", MessageType::Info);
-    } else {
-        channel.exec(
-            "/ip firewall filter set [find comment=\"Bloqueo Internet LAB 3\"] disabled=yes",
-        )?;
-        show_alert("Filtro de bloqueo de internet desactivado", MessageType::Info);
+    // Run the SSH connection and command in a separate thread
+    let (tx, rx) = mpsc::channel::<Result<bool, String>>();
+    std::thread::spawn(move || {
+        let result = (|| -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
+            let sess = make_session(host, port, user, pass)?;
+            if !sess.authenticated() {
+                return Err("No se pudo autenticar con el servidor".into());
+            }
+            // If the main thread has already timed out, abort before changing anything.
+            if cancelled_worker.load(Ordering::Relaxed) {
+                return Err("Operación cancelada por tiempo de espera".into());
+            }
+            let mut channel = sess.channel_session()?;
+            if enable_block {
+                channel.exec(
+                    "/ip firewall filter set [find comment=\"Bloqueo Internet LAB 3\"] disabled=no",
+                )?;
+            } else {
+                channel.exec(
+                    "/ip firewall filter set [find comment=\"Bloqueo Internet LAB 3\"] disabled=yes",
+                )?;
+            }
+            Ok(enable_block)
+        })();
+        tx.send(result.map_err(|e| e.to_string())).ok();
+    });
+
+    // Wait for the SSH thread with a slightly longer timeout than the SSH timeout itself
+    match rx.recv_timeout(Duration::from_secs(SSH_TIMEOUT_SECS + SSH_GRACE_PERIOD_SECS)) {
+        Ok(Ok(blocked)) => {
+            if blocked {
+                show_alert("Filtro de bloqueo de internet activado", MessageType::Info);
+            } else {
+                show_alert("Filtro de bloqueo de internet desactivado", MessageType::Info);
+            }
+        }
+        Ok(Err(e)) => {
+            show_alert(&format!("Error: {}", e), MessageType::Error);
+        }
+        Err(_) => {
+            // Signal the worker not to run the firewall command if it hasn't yet.
+            cancelled.store(true, Ordering::Relaxed);
+            show_alert(
+                "Error: Tiempo de espera agotado. No se pudo conectar al servidor.",
+                MessageType::Error,
+            );
+        }
     }
 
     Ok(())
