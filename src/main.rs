@@ -3,8 +3,9 @@
 use native_dialog::{MessageDialog, MessageType};
 use ssh2::Session;
 use std::env;
-use std::net::TcpStream;
-use std::sync::mpsc;
+use std::net::{TcpStream, ToSocketAddrs};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc, Arc};
 use std::time::Duration;
 
 const SSH_TIMEOUT_SECS: u64 = 10;
@@ -19,7 +20,11 @@ fn make_session(
     pass: &str,
 ) -> Result<Session, Box<dyn std::error::Error + Send + Sync>> {
     let addr = format!("{}:{}", ip, port);
-    let tcp = TcpStream::connect_timeout(&addr.parse()?, Duration::from_secs(SSH_TIMEOUT_SECS))?;
+    let sock_addr = addr
+        .to_socket_addrs()?
+        .next()
+        .ok_or("No se pudo resolver la dirección del servidor")?;
+    let tcp = TcpStream::connect_timeout(&sock_addr, Duration::from_secs(SSH_TIMEOUT_SECS))?;
     let mut sess = Session::new()?;
 
     sess.set_tcp_stream(tcp);
@@ -73,15 +78,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     let enable_block = show_confirm("¿Activar el bloqueo de internet?")?;
 
-    // Show loading modal in a background thread while SSH connects.
-    // The thread is intentionally not joined: when run() returns and main()
-    // exits, the process terminates and the dialog is automatically closed.
-    std::thread::spawn(|| {
-        show_alert(
-            "Conectando al servidor MikroTik...\nPor favor espere (máximo 10 segundos).",
-            MessageType::Info,
-        );
-    });
+    // Shared flag: the main thread sets this to true when recv_timeout expires,
+    // signalling the worker that it must not execute the firewall command.
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let cancelled_worker = Arc::clone(&cancelled);
 
     // Run the SSH connection and command in a separate thread
     let (tx, rx) = mpsc::channel::<Result<bool, String>>();
@@ -90,6 +90,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             let sess = make_session(host, port, user, pass)?;
             if !sess.authenticated() {
                 return Err("No se pudo autenticar con el servidor".into());
+            }
+            // If the main thread has already timed out, abort before changing anything.
+            if cancelled_worker.load(Ordering::Relaxed) {
+                return Err("Operación cancelada por tiempo de espera".into());
             }
             let mut channel = sess.channel_session()?;
             if enable_block {
@@ -119,6 +123,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             show_alert(&format!("Error: {}", e), MessageType::Error);
         }
         Err(_) => {
+            // Signal the worker not to run the firewall command if it hasn't yet.
+            cancelled.store(true, Ordering::Relaxed);
             show_alert(
                 "Error: Tiempo de espera agotado. No se pudo conectar al servidor.",
                 MessageType::Error,
